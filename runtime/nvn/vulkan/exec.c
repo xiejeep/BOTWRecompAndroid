@@ -1053,6 +1053,10 @@ static VkSpan copy_dedupe(int slot, const void *data, uint64_t size, uint64_t al
 #define GCOPY_TAB 4096
 static struct { uint64_t addr, size, seq; VkSpan span; } gcopy[GCOPY_TAB];
 static uint16_t gcopy_active[GCOPY_TAB];
+// Invalidation clears an entry's seq, but must not register its slot again. Otherwise
+// repeated UBO updates fill the list with duplicates and later slots go untracked.
+static uint64_t gcopy_listed_seq[GCOPY_TAB];
+static bool gcopy_unique_active;
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
@@ -1067,10 +1071,20 @@ static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
 }
 static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40), h = (addr * 0x9E3779B97F4A7C15ull) ^ (size * 0xC2B2AE3D27D4EB4Full);
-    if (gcopy_active_seq != seq) { gcopy_active_seq = seq; gcopy_nactive = 0; }
+    if (gcopy_active_seq != seq) {
+        gcopy_active_seq = seq; gcopy_nactive = 0;
+        static int unique = -1;
+        if (unique < 0) { const char *e = getenv("LARECOMP_CB_ACTIVE_UNIQUE"); unique = e ? atoi(e) != 0 : 1; }
+        int ab = AB("cbactive");
+        gcopy_unique_active = ab >= 0 ? ab != 0 : unique != 0;
+    }
     uint32_t slot = (uint32_t)(h ^ (h >> 32)) & (GCOPY_TAB - 1);
     if (gcopy[slot].seq == seq && gcopy[slot].addr == addr && gcopy[slot].size == size) return gcopy[slot].span;
-    if (gcopy[slot].seq != seq && gcopy_nactive < GCOPY_TAB) gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+    bool register_slot = gcopy_unique_active ? gcopy_listed_seq[slot] != seq : gcopy[slot].seq != seq;
+    if (register_slot && gcopy_nactive < GCOPY_TAB) {
+        gcopy_active[gcopy_nactive++] = (uint16_t)slot;
+        gcopy_listed_seq[slot] = seq;
+    }
     VkSpan s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
     stat_cb_copied += size;
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
@@ -1379,13 +1393,19 @@ static void st_defaults(void) {
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
 }
 
+#ifdef __ANDROID__
+static void heap_write_tracking_enable(void) {
+    plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+}
+#endif
+
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
 #ifdef __ANDROID__
     gcopy_mode = !g_vk.host_import && !getenv("LARECOMP_VK_NO_GCOPY");
     if (gcopy_mode) LOG("[vk] no heap import: shader global memory through CPU copies\n");
     // (for good, without placed memory: the vertex cache and the texture checks fed by write tracking - vc_flush)
-    if (gcopy_mode && !g_vk.map_placed) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+    if (gcopy_mode && !g_vk.map_placed) heap_write_tracking_enable();
 #endif
     if (prof) {
         prof_up_ns = 0;
@@ -3624,10 +3644,17 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
 // Off by default since 2026-10-27: in play (1.9.0) the water turned white and the terrain showed stretched "curtains",
 // and objects far away grew spikes on a hit - the buffer read in place while the CPU already writes the next frame's
 // rows there (the sync lag lets the CPU run a frame ahead). LARECOMP_CB_WINDOW=1: on (a test).
+// Immutable snapshot variant: works without a GPU-mapped heap and never lets later
+// guest writes alter an earlier draw. Opt-in until device A/B validation is complete.
+static bool cbwin_snapshot_on(void) {
+    static int on = -1;
+    if (on < 0) { const char *e = getenv("LARECOMP_CB_SNAPSHOT"); on = e && atoi(e) != 0; }
+    return on;
+}
 static bool cbwin_wanted(void) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW"));
-    return on && gmem_placed;
+    return cbwin_snapshot_on() || (on && gmem_placed);
 }
 // (the update marks are guest addresses: a reboot's game puts other things there)
 RT_ON_RESET(ubo_inline_reset) {
@@ -3665,8 +3692,8 @@ static uint64_t cbwin_rows(uint64_t addr, uint64_t size) {
 }
 
 static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
-    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
-    if (addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+    if ((stage != 0 && stage != 1) || (!gmem_placed && !cbwin_snapshot_on()) || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
+    if (addr < HEAP_BASE || size > HEAP_MAX || addr - HEAP_BASE > HEAP_MAX - size) return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange ||
         off > 0xFFFFFFFFull)
@@ -3678,7 +3705,30 @@ static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescrip
     cbw_patch[stage].m[1] = (uint32_t)((first - addr) >> 4);
     cbw_patch[stage].m[2] = (uint32_t)n;
     stat_cbwin++;
-    *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
+    if (cbwin_snapshot_on()) {
+        // Only reuse within the same submission and heap generation. Compare all
+        // unpatched bytes: an update outside the learned window forces a new copy.
+        static struct { uint64_t addr, size, seq, gen; VkSpan span; } cache[64];
+        unsigned slot = (unsigned)((addr >> 8) ^ (size >> 4)) & 63;
+        uint64_t seq = vk_pending_seq(), prefix = first - addr, end = prefix + n * 16;
+        const uint8_t *src = (const uint8_t *)(uintptr_t)addr;
+        bool reuse = cache[slot].addr == addr && cache[slot].size == size &&
+                     cache[slot].seq == seq && cache[slot].gen == gcopy_gen;
+        if (reuse) {
+            const uint8_t *old = cache[slot].span.ptr;
+            reuse = !memcmp(old, src, prefix) && !memcmp(old + end, src + end, size - end);
+        }
+        if (!reuse) {
+            VkSpan copy = vk_transient_copy(src, size, 256);
+            stat_cb_copied += size;
+            cache[slot].addr = addr; cache[slot].size = size;
+            cache[slot].seq = vk_pending_seq(); cache[slot].gen = gcopy_gen; cache[slot].span = copy;
+        }
+        *out = ubo_span(cache[slot].span, size);
+    } else {
+        if (addr + size > HEAP_BASE + gmem_size) { cbw_patch[stage].m[0] = 0; return false; }
+        *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
+    }
     return true;
 }
 static bool gmem_placed_(void) { return gmem_placed; }
@@ -3740,7 +3790,7 @@ bool vk_heap_place(uint64_t size) {
     // OS's write tracking - vk_exec_init turns it on only without placed memory at all, so a Turnip that has it but
     // isn't an Adreno 8xx (Automatic) had neither: every vertex and index buffer copied each frame, ~150 MB, 7-9 fps
     // on an Adreno 730 (issue #31). A page not tracked yet counts as written, so turning it on late is safe.
-#define NOT_PLACED() (gcopy_mode ? plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX) : (void)0, false)
+#define NOT_PLACED() (gcopy_mode ? heap_write_tracking_enable() : (void)0, false)
     if (!g_vk.map_placed || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
     extern bool vk_turnip_path_on(int setting);
     if (!vk_turnip_path_on(g_settings.gpu_heap)) {
@@ -3965,33 +4015,152 @@ static GcBack gc_back[256];
 static int gc_nback;
 static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// A resident range can be registered repeatedly within one submission. Its source is
+// read only after that submission completes, so identical records perform the same
+// copy-back checks. Only cross disjoint destinations: an overlapping write or a
+// different submission is an ordering boundary, even when its source differs.
+static bool gcopy_pending_duplicate(const GcBack *next) {
+    if (!next->shadow) return false;
+    for (int i = gc_nback - 1; i >= 0; i--) {
+        const GcBack *prev = &gc_back[i];
+        if (prev->seq != next->seq) break;
+        if (prev->src == next->src && prev->addr == next->addr && prev->len == next->len &&
+            prev->shadow == next->shadow && prev->bseq == next->bseq) return true;
+        if (prev->addr < next->addr + next->len && next->addr < prev->addr + prev->len) break;
+    }
+    return false;
+}
+
+
+// LARECOMP_GCOPY_STATS=1: count which checks in gcopy_retire keep each 256-byte block from being copied back.
+// This is diagnostic only; it does not change the copy-back decision or synchronization.
+typedef struct {
+    uint64_t calls, ranges, direct_ranges, direct_bytes;
+    uint64_t seq_skip, gpu_unchanged, cpu_changed, writeback;
+    uint64_t src_cmp_bytes, guest_cmp_bytes, writeback_bytes;
+    uint64_t batch_equal_groups, batch_equal_blocks, batch_fallback_groups;
+    uint64_t dedup_ranges, dedup_bytes;
+} GcStats;
+static GcStats gc_stats;
+static uint64_t gc_stats_at;
+static int gc_stats_on = -1;
+static int gc_batch_cmp_on = -1;
+
 static void gcopy_retire(uint64_t done) {
     pthread_mutex_lock(&gc_lock);
+    if (gc_stats_on < 0) gc_stats_on = getenv("LARECOMP_GCOPY_STATS") != NULL;
+    if (gc_batch_cmp_on < 0) {
+        const char *e = getenv("LARECOMP_GCOPY_BATCH_CMP");
+        gc_batch_cmp_on = e ? atoi(e) != 0 : 1;  // (the exact 256 B fallback remains available with =0)
+    }
+    int ab_cmp = AB("gcopycmp");
+    bool batch_cmp = ab_cmp >= 0 ? ab_cmp != 0 : gc_batch_cmp_on != 0;
+    if (gc_stats_on) gc_stats.calls++;
     int k = 0;
     for (int i = 0; i < gc_nback; i++) {
         if (gc_back[i].seq <= done) {
             if (!gc_back[i].shadow) {
+                if (gc_stats_on) { gc_stats.direct_ranges++; gc_stats.direct_bytes += gc_back[i].len; }
                 memcpy((void *)(uintptr_t)gc_back[i].addr, gc_back[i].src, gc_back[i].len);
                 continue;
             }
+            if (gc_stats_on) gc_stats.ranges++;
             // (the arena: 256 bytes at a time, what the GPU changed since the last upload - the shadow - and the CPU
             // didn't: a block the CPU wrote meanwhile stays the CPU's (gres_sync uploads it); copying whole ranges
             // back undid the CPU's writes made since, for good - wrong shadows while moving)
             uint8_t *g = (uint8_t *)(uintptr_t)gc_back[i].addr, *sh = gc_back[i].shadow;
             const uint8_t *src = gc_back[i].src;
-            for (uint64_t b = 0; b < gc_back[i].len; b += 256) {
+            for (uint64_t b = 0; b < gc_back[i].len;) {
                 uint64_t n = gc_back[i].len - b < 256 ? gc_back[i].len - b : 256;
                 // (a block the CPU's newer data was uploaded into after this submission: the shadow is that data
                 // already while the slot may not have it yet - comparing them took the slot's older bytes for the
                 // GPU's and wrote them over the CPU's: the game's allocator lists looped, the game hung)
-                if (gc_back[i].bseq[b / 256] > gc_back[i].seq) continue;
-                if (!memcmp(src + b, sh + b, n) || memcmp(g + b, sh + b, n)) continue;  // (GPU unchanged / CPU wrote)
+                if (gc_back[i].bseq[b / 256] > gc_back[i].seq) {
+                    if (gc_stats_on) gc_stats.seq_skip++;
+                    b += n;
+                    continue;
+                }
+                if (batch_cmp) {
+                    // Most 256-byte blocks are unchanged by the GPU. Compare up to 1 KB at once to amortize
+                    // memcmp call overhead; any differing group falls back to exact per-block checks below.
+                    uint64_t start = b, blocks = 0;
+                    do {
+                        uint64_t part = gc_back[i].len - b < 256 ? gc_back[i].len - b : 256;
+                        b += part;
+                        blocks++;
+                        if (b >= gc_back[i].len || b - start >= 1024 ||
+                            gc_back[i].bseq[b / 256] > gc_back[i].seq) break;
+                    } while (true);
+                    uint64_t size = b - start;
+                    if (gc_stats_on) gc_stats.src_cmp_bytes += size;
+                    if (!memcmp(src + start, sh + start, size)) {
+                        if (gc_stats_on) {
+                            gc_stats.gpu_unchanged += blocks;
+                            gc_stats.batch_equal_groups++;
+                            gc_stats.batch_equal_blocks += blocks;
+                        }
+                        continue;
+                    }
+                    if (gc_stats_on) gc_stats.batch_fallback_groups++;
+                    for (uint64_t q = start; q < b;) {
+                        uint64_t part = b - q < 256 ? b - q : 256;
+                        if (gc_stats_on) gc_stats.src_cmp_bytes += part;
+                        if (!memcmp(src + q, sh + q, part)) {
+                            if (gc_stats_on) gc_stats.gpu_unchanged++;
+                            q += part;
+                            continue;
+                        }
+                        if (gc_stats_on) gc_stats.guest_cmp_bytes += part;
+                        if (memcmp(g + q, sh + q, part)) {
+                            if (gc_stats_on) gc_stats.cpu_changed++;
+                            q += part;
+                            continue;
+                        }
+                        if (gc_stats_on) { gc_stats.writeback++; gc_stats.writeback_bytes += part; }
+                        memcpy(g + q, src + q, part);
+                        memcpy(sh + q, src + q, part);
+                        q += part;
+                    }
+                    continue;
+                }
+                if (gc_stats_on) gc_stats.src_cmp_bytes += n;
+                if (!memcmp(src + b, sh + b, n)) {
+                    if (gc_stats_on) gc_stats.gpu_unchanged++;
+                    b += n;
+                    continue;
+                }
+                if (gc_stats_on) gc_stats.guest_cmp_bytes += n;
+                if (memcmp(g + b, sh + b, n)) {
+                    if (gc_stats_on) gc_stats.cpu_changed++;
+                    b += n;
+                    continue;
+                }
+                if (gc_stats_on) { gc_stats.writeback++; gc_stats.writeback_bytes += n; }
                 memcpy(g + b, src + b, n);
                 memcpy(sh + b, src + b, n);
+                b += n;
             }
         } else gc_back[k++] = gc_back[i];
     }
     gc_nback = k;
+    if (gc_stats_on) {
+        uint64_t now = SDL_GetTicksNS();
+        if (!gc_stats_at) gc_stats_at = now;
+        else if (now - gc_stats_at >= 2000000000ull) {
+            LOG("[gcopy] retire/2s ab %d calls %llu ranges %llu direct %llu/%llu B seq-skip %llu GPU-same %llu CPU-preserve %llu writeback %llu/%llu B cmp-src %llu B cmp-guest %llu B batch-equal %llu/%llu blocks fallback %llu\n",
+                ab_cmp,
+                (unsigned long long)gc_stats.calls, (unsigned long long)gc_stats.ranges,
+                (unsigned long long)gc_stats.direct_ranges, (unsigned long long)gc_stats.direct_bytes,
+                (unsigned long long)gc_stats.seq_skip, (unsigned long long)gc_stats.gpu_unchanged,
+                (unsigned long long)gc_stats.cpu_changed, (unsigned long long)gc_stats.writeback,
+                (unsigned long long)gc_stats.writeback_bytes, (unsigned long long)gc_stats.src_cmp_bytes,
+                (unsigned long long)gc_stats.guest_cmp_bytes, (unsigned long long)gc_stats.batch_equal_groups,
+                (unsigned long long)gc_stats.batch_equal_blocks, (unsigned long long)gc_stats.batch_fallback_groups);
+            LOG("[gcopy-dedup] %llu ranges / %llu bytes avoided\n", (unsigned long long)gc_stats.dedup_ranges, (unsigned long long)gc_stats.dedup_bytes);
+            memset(&gc_stats, 0, sizeof gc_stats);
+            gc_stats_at = now;
+        }
+    }
     pthread_mutex_unlock(&gc_lock);
 }
 
@@ -4261,9 +4430,15 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             // also reads what its compute shaders wrote as uniform buffers, vertices and textures, which come from
             // guest memory (gcopy_retire, at the game's waits)
             pthread_mutex_lock(&gc_lock);
-            if (gc_nback < 256)
-                gc_back[gc_nback++] = (GcBack){ga_ptr + e->off + (lo - e->lo), HEAP_BASE + lo, hi - lo, vk_pending_seq(),
-                                               e->shadow + (lo - e->lo), e->bseq + (lo - e->lo) / 256};
+            GcBack next = {ga_ptr + e->off + (lo - e->lo), HEAP_BASE + lo, hi - lo, vk_pending_seq(),
+                           e->shadow + (lo - e->lo), e->bseq + (lo - e->lo) / 256};
+            static int dedupe = -1;
+            // Default on; LARECOMP_GCOPY_DEDUP=0 restores the uncoalesced records.
+            if (dedupe < 0) { const char *v = getenv("LARECOMP_GCOPY_DEDUP"); dedupe = v ? atoi(v) != 0 : 1; }
+            int ab_dedup = AB("gcopydedup");
+            bool same = (ab_dedup >= 0 ? ab_dedup : dedupe) && gcopy_pending_duplicate(&next);
+            if (same && gc_stats_on > 0) { gc_stats.dedup_ranges++; gc_stats.dedup_bytes += next.len; }
+            if (!same && gc_nback < 256) gc_back[gc_nback++] = next;
             pthread_mutex_unlock(&gc_lock);
             continue;
         }
@@ -4448,7 +4623,7 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
 // of fetches across the bus. Overlapping ranges are separate entries; the per-page generation keeps them all current.
 // Pages the GPU writes itself (a compute dispatch's copy-back, gfast_finish) are never cached: draws over them read the
 // heap in place as before, and so does everything when the OS gives no write tracking. LARECOMP_VK_VCACHE=0: off.
-#define VC_PAGE 4096ull
+#define VC_PAGE 65536ull
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
 #define VC_BUDGET (768ull << 20)      // device-local bytes kept; the least recently used go first
