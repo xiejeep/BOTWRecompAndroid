@@ -8,7 +8,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 D=$PWD
-NDK=${ANDROID_NDK_LINUX:-$HOME/android-ndk-r30}
+NDK=${ANDROID_NDK:-${ANDROID_NDK_LINUX:-${ANDROID_HOME:-$HOME/Android/Sdk}/ndk/30.0.16248370}}
 [ -d "$NDK" ] || { echo "no Linux NDK at $NDK (android/deps/build_ffmpeg.sh fetches it)"; exit 1; }
 export PATH="$HOME/botwrecompandroid-tools/bin:$PATH"
 command -v cmake >/dev/null && command -v ninja >/dev/null || { echo "cmake / ninja: see the header"; exit 1; }
@@ -20,11 +20,15 @@ if ! command -v pkg-config >/dev/null; then
 fi
 SRC=$D/src/unicorn-2.1.4.tar.gz
 echo "ea8863f095a0136388694e5a6063afd9bb7650e30243dd6251af59c5ce5601f4  $SRC" | sha256sum -c --quiet
-W=$HOME/botwrecompandroid-unicorn  # (the Linux file system: QEMU's configure is slow on /mnt)
+W=$D/work/unicorn-android
 rm -rf "$W" && mkdir -p "$W/src" && tar -xzf "$SRC" -C "$W/src" --strip-components 1
 # (QEMU's configure gets the NDK's clang without its target, so its test programs fail and it decides there is no
 # __int128 - aarch64 has it, and int128.h's fallback then clashes with the compiler's own type)
-sed -i 's/^int128=no$/int128=yes/' "$W/src/qemu/configure"
+python3 - "$W/src/qemu/configure" <<'PY'
+import pathlib, sys
+p = pathlib.Path(sys.argv[1])
+p.write_text(p.read_text().replace('int128=no\n', 'int128=yes\n'))
+PY
 cmake -S "$W/src" -B "$W/build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
     -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 -DCMAKE_BUILD_TYPE=Release -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384 \
@@ -32,5 +36,6 @@ cmake -S "$W/src" -B "$W/build" -G Ninja -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmak
 cmake --build "$W/build"
 mkdir -p "$D/out/gen/lib"
 cp -L "$(ls "$W"/build/libunicorn.so* | head -1)" "$D/out/gen/lib/libunicorn.so"
-"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "$D/out/gen/lib/libunicorn.so"
+case "$(uname -s)" in Darwin) HOST=darwin-x86_64 ;; *) HOST=linux-x86_64 ;; esac
+"$NDK/toolchains/llvm/prebuilt/$HOST/bin/llvm-strip" --strip-unneeded "$D/out/gen/lib/libunicorn.so"
 ls -la "$D/out/gen/lib/libunicorn.so"

@@ -19,6 +19,7 @@ android {
 
     defaultConfig {
         applicationId = "com.botwrecomp.android"
+        testInstrumentationRunner = "com.botwrecompandroid.BuildServiceSmokeTest"
         minSdk = 30
         targetSdk = 36
         versionCode = 22
@@ -104,6 +105,13 @@ val prepareBotwRecompAndroid by tasks.registering {
     inputs.files(hotLists)
     outputs.dir(gen)
     doLast {
+        val requiredTools = listOf("python/libpymain.so", "python/libpython3.14.so", "python/lib/python3.14/os.py",
+            "zig/libzig.so", "zig/lib/include/stddef.h", "site/capstone/__init__.py",
+            "site/unicorn/__init__.py", "site/lz4/block.py", "lib/libcapstone.so", "lib/libunicorn.so", "lib/liblz4.so")
+        val missingTools = requiredTools.filter { !deps.resolve("gen/$it").isFile }
+        check(missingTools.isEmpty()) {
+            "Game code builder incomplete: ${missingTools.joinToString()}. Run android/deps/build_gen_deps.sh before building the APK."
+        }
         val out = gen.get().asFile
         // CR dropped, non-ASCII bytes as '?', backslashes and quotes escaped, every line a "...\n" literal
         val bytes = smaa.readBytes().filter { it != '\r'.code.toByte() }.map { if (it < 0) '?'.code.toByte() else it }

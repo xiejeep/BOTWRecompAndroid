@@ -354,6 +354,11 @@ static float extract_progress(void) {
 // Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so)
 static bool build_game_code(const std::string &dir) {
     if (native_wanted()) return true;  // (the game's own code runs as it is)
+    if (!gamebuild_available()) {
+        set_failure(FAIL_BUILD);
+        set_job_detail("The game code builder is missing from this copy of BOTWRecompAndroid");
+        return false;
+    }
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
     GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
     char why[256] = "";

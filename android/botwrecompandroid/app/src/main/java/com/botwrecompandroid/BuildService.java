@@ -10,6 +10,8 @@ import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.IBinder;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
 
@@ -23,8 +25,19 @@ public class BuildService extends Service {
     private static final int ID = 1;
     private static PowerManager.WakeLock wake;
     private static int shown = -1;
+    private static final String STOP = "com.botwrecompandroid.STOP_BUILD";
+    private static final Handler main = new Handler(Looper.getMainLooper());
+    private static boolean requested;
+    private static BuildService running;
 
     static void start(Context c) {
+        Context app = c.getApplicationContext();
+        main.post(() -> startOnMain(app));
+    }
+
+    private static void startOnMain(Context c) {
+        requested = true;
+        shown = -1;
         try {
             c.startForegroundService(new Intent(c, BuildService.class));
         } catch (Exception e) {  // (from the background Android may refuse: the build goes on without it)
@@ -33,15 +46,29 @@ public class BuildService extends Service {
     }
 
     static void stop(Context c) {
-        shown = -1;
-        c.stopService(new Intent(c, BuildService.class));
+        Context app = c.getApplicationContext();
+        main.post(() -> {
+            requested = false;
+            shown = -1;
+            // Deliver the stop after the start command: stopService can cancel a pending foreground start
+            // before onStartCommand has had a chance to call startForeground, causing an Android timeout.
+            try {
+                app.startService(new Intent(app, BuildService.class).setAction(STOP));
+            } catch (Exception e) {
+                Log.w(TAG, "build service: stop: " + e);
+            }
+        });
     }
 
     static void progress(Context c, int percent) {
-        if (percent == shown) return;
-        shown = percent;
-        NotificationManager nm = c.getSystemService(NotificationManager.class);
-        if (nm != null) nm.notify(ID, notification(c, percent));
+        main.post(() -> {
+            if (!requested || percent == shown) return;
+            shown = percent;
+            if (running != null) {
+                NotificationManager nm = running.getSystemService(NotificationManager.class);
+                if (nm != null) nm.notify(ID, notification(running, percent));
+            }
+        });
     }
 
     private static Notification notification(Context c, int percent) {
@@ -70,6 +97,13 @@ public class BuildService extends Service {
             else startForeground(ID, n);
         } catch (Exception e) {
             Log.w(TAG, "build service: not in the foreground: " + e);
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        running = this;
+        if (intent != null && STOP.equals(intent.getAction())) {
+            stopSelf(startId);
+            return START_NOT_STICKY;
         }
         if (wake == null) {
             PowerManager pm = getSystemService(PowerManager.class);
@@ -82,6 +116,7 @@ public class BuildService extends Service {
 
     @Override
     public void onDestroy() {
+        if (running == this) running = null;
         if (wake != null && wake.isHeld()) wake.release();
         Log.i(TAG, "build service: off");
         super.onDestroy();
