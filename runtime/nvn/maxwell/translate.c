@@ -658,9 +658,11 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
         // that texel exactly, while the Adreno's finer weights blended in a trace of the next one - the edges' heights
         // differed and the ground showed a grid of dotted cracks, denser at higher resolutions (issue #21; with nearest
         // filtering they were gone, 2026-10-27). LARECOMP_NO_VS_SNAP=1: not rounded.
-        static int snap = -1;
+        static int snap = -1, fs_snap = -1;
         if (snap < 0) snap = getenv("LARECOMP_NO_VS_SNAP") == NULL;
-        if (snap && c->stage == STAGE_VERTEX && !t->shadow && lod_kind == 1) {
+        if (fs_snap < 0) fs_snap = getenv("LARECOMP_FS_SNAP") != NULL;  // (diagnosis: fragment lookups too, at level 0's texels)
+        if ((snap && c->stage == STAGE_VERTEX && !t->shadow && lod_kind == 1) ||
+            (fs_snap && c->stage == STAGE_FRAGMENT && !t->shadow)) {
             char raw[1600];
             snprintf(raw, sizeof raw, "%s", xs);
             snprintf(xs, sizeof xs, "(floor((%s) * vec2(tsize%d(%s).xy) * 256.0f + 0.5f) / (vec2(tsize%d(%s).xy) * 256.0f))",
@@ -704,6 +706,22 @@ static void glsl_gather(Ctx *c, char *out, int slot, const char *const *co, cons
     if (n == 2) {
         if (off) snprintf(xs, sizeof xs, "(vec2(%s, %s) + vec2(%s)%s / vec2(tsize%d(0).xy))", co[0], co[1], off, off_scale(c, slot, 2), slot);
         else snprintf(xs, sizeof xs, "vec2(%s, %s)", co[0], co[1]);
+        // The coordinates rounded to 1/256 of a texel, as the Switch's texture unit takes them, and nudged a quarter of
+        // that up: a gather's 2x2 is the texels around the coordinate, so at a texel's centre - a pixel's own, gathered
+        // from a target of the same size - which 2x2 it is hangs on the last bit. The Switch rounds it there exactly
+        // and keeps the pixel's texel at the 2x2's top left; the Adreno, a hair under from the interpolation, took the
+        // 2x2 before it - another pixel's depth. BOTW's half-size ambient occlusion (fs 8c42c9bc) gathers its depth
+        // that way: by the blades of grass it shaded dark dots, in rows and columns across the screen where the
+        // interpolation's error changes sign (2026-10-28; the dots on grassy ground at more than 50% resolution, in
+        // both modes, and also in Switch emulators on Adreno). LARECOMP_NO_GATHER_SNAP=1: not rounded.
+        static int snap = -1;
+        if (snap < 0) snap = getenv("LARECOMP_NO_GATHER_SNAP") == NULL;
+        if (snap) {
+            char raw[1600];
+            snprintf(raw, sizeof raw, "%s", xs);
+            snprintf(xs, sizeof xs, "((floor((%s) * vec2(tsize%d(0).xy) * 256.0f + 0.5f) + 0.25f) / (vec2(tsize%d(0).xy) * 256.0f))",
+                     raw, slot, slot);
+        }
     } else {
         snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);
     }
@@ -1173,6 +1191,24 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
 }
 
 // ------------------------------------------------------------------ instruction translation
+// Whether the instruction that last wrote reg before pc (straight-line, 32 back) is FMUL by the immediate 255.0: an
+// 8-bit value read back from a UNORM texture. Truncated, a sample a little under k/255 gives k - 1: off the texel
+// centre (a scaled G-buffer) the filter lands there, and the material ID 7 read as 6 left distant trees unlit (#112).
+static bool scaled_by_255(const Ctx *c, uint32_t pc, int reg) {
+    const uint64_t *code = (const uint64_t *)c->code;
+    for (size_t i = pc / 8, n = 0; i-- > 0 && n < 32; n++) {
+        if (i % 4 == 0) continue;
+        uint64_t x = code[i];
+        if ((int)bits(x, 0, 8) != reg) continue;
+        if ((x & 0xfef8000000000000ull) == 0x3868000000000000ull)  // FMUL imm: 19 bits + sign at 56, the float's top
+            return !bits(x, 56, 1) && (uint32_t)bits(x, 20, 19) << 12 == 0x437f0000u;
+        if ((x & 0xff00000000000000ull) == 0x1e00000000000000ull)  // FMUL32I
+            return (uint32_t)bits(x, 20, 32) == 0x437f0000u;
+        return false;
+    }
+    return false;
+}
+
 static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
     char t[2048], u[2048];
     int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
@@ -1329,7 +1365,22 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         case 1: sprintf(t, "sin(%s)", x); break;
         case 2: sprintf(t, "exp2(%s)", x); break;
         case 3: sprintf(t, "log2(%s)", x); break;
-        case 4: sprintf(t, "(1.0f / %s)", x); break;
+        case 4: {
+            // BOTW's particles (the eft2 vertex shaders) stretch along their velocity by velocity / the effect's time
+            // step, c[10][0x2c] - the game's delta frame, 1.0 at 30 fps and 0.5 at 60, times the slowest time
+            // multiplier: a hit-stop's 10% drew Death Mountain's smoke, the horizon's and defeated monsters' as stars
+            // of spikes for a few frames (at 30 fps too: the game's own). The reciprocal of that step, and only that,
+            // reads it at no less than 0.5: slow motion no longer lengthens them (the stretch of 60 fps without it).
+            // LARECOMP_NO_STEP_CLAMP=1: as the game does.
+            static int clamp_step = -1;
+            if (clamp_step < 0) clamp_step = getenv("LARECOMP_NO_STEP_CLAMP") == NULL;
+            uint32_t bank, off;
+            if (clamp_step && c->stage == STAGE_VERTEX && handle_cbuf(c, pc, a, &bank, &off) && bank == 10 && off == 0x2c)
+                sprintf(t, "(1.0f / max(%s, 0.5f))", x);
+            else
+                sprintf(t, "(1.0f / %s)", x);
+            break;
+        }
         case 5: sprintf(t, "rsqrt(%s)", x); break;
         case 8: sprintf(t, "sqrt(%s)", x); break;
         default: fail(c, "mufu %d", fn); return;
@@ -1428,6 +1479,11 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int rnd = (int)bits(w, 39, 2);
         bool sgn = bits(w, 12, 1), i16 = bits(w, 8, 2) == 1;
         static const char *const rf[] = {"rint", "floor", "ceil", "trunc"};
+        static int unorm_round = -1;  // (LARECOMP_NO_UNORM_ROUND=1: truncated as written)
+        if (unorm_round < 0) unorm_round = getenv("LARECOMP_NO_UNORM_ROUND") == NULL;
+        if (rnd == 3 && unorm_round && OPM(0x5cb0000000000000ull, 0xfff8000000000000ull) && bits(w, 10, 2) == 2 &&
+            scaled_by_255(c, pc, (int)bits(w, 20, 8)))
+            rnd = 0;
         if (i16)
             sprintf(t, sgn ? "uint(int(clamp(%s(%s), -32768.0f, 32767.0f)))" : "uint(clamp(%s(%s), 0.0f, 65535.0f))", rf[rnd], x);
         else
@@ -1518,6 +1574,19 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
             }
             if (d != RZ) { c->reg_used[d] = 1; sp(&c->body, "      r%d = uint(sum);\n", d); }
             sp(&c->body, "    }\n");
+        } else if (OPM(0x5cc0000000000000ull, 0xfff0000000000000ull) && bits(w, 31, 8)) {
+            // (SavageWindRecomp 7ce70fa, MIT) register form with a shift or half selects: .RS / .LS (bits 37-38) shift
+            // the first two operands' sum 16 bits right / left before the third is added; bits 35-36, 33-34, 31-32 pick
+            // a / b / c's low or high half (1 low, 2 high). The compiler's division by a constant ends in IADD3.RS:
+            // without the shift the quotient was wrong (BOTW's beach shell sprites drawn as huge walls, their #147).
+            static const char *const half[4] = {"", " & 0xFFFFu", " >> 16", ""};
+            int sh = (int)bits(w, 37, 2);
+            char ra[96], rb[96], rc[96];
+            snprintf(ra, sizeof ra, "%s(%s%s)", bits(w, 51, 1) ? "-" : "", R(a), half[bits(w, 35, 2)]);  // (half, then negate)
+            snprintf(rb, sizeof rb, "%s(%s%s)", bits(w, 50, 1) ? "-" : "", B(false), half[bits(w, 33, 2)]);
+            snprintf(rc, sizeof rc, "%s(%s%s)", bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)), half[bits(w, 31, 2)]);
+            sprintf(t, "(((%s + %s)%s) + %s)", ra, rb, sh == 1 ? " >> 16u" : sh == 2 ? " << 16u" : "", rc);
+            set_reg(c, d, t);
         } else {
             sprintf(t, "(%s%s + %s%s + %s%s)", bits(w, 51, 1) ? "-" : "", R(a), bits(w, 50, 1) ? "-" : "", B(false),
                     bits(w, 49, 1) ? "-" : "", R((int)bits(w, 39, 8)));

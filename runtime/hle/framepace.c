@@ -38,7 +38,7 @@
 #include "../framepace.h"
 
 #ifdef LARECOMP_NO_FFMPEG
-static volatile int g_movie_playing;  // No video decoders in this build.
+static volatile int g_movie_playing;  // (no movie.c without FFmpeg: no movies)
 #else
 extern volatile int g_movie_playing;  // runtime/hle/movie.c: video decoders running
 #endif

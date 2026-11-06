@@ -22,8 +22,8 @@ android {
         testInstrumentationRunner = "com.botwrecompandroid.BuildServiceSmokeTest"
         minSdk = 30
         targetSdk = 36
-        versionCode = 22
-        versionName = "0.2.2-beta"
+        versionCode = 25
+        versionName = "0.2.5-beta"
         ndk {
             abiFilters += "arm64-v8a"
         }

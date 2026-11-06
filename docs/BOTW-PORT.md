@@ -659,6 +659,171 @@ Medição no planalto (2026-10-21, save do usuário perto da igreja, POCO F7 Ult
 
 - Distribuição do APK Android, sem nada do jogo.
 
+## A fazer (atualizado em 2026-10-28)
+
+A lista corrente; a fila abaixo guarda o histórico de cada item.
+
+**Próxima versão (0.2.3, versionCode >= 23; lançar só com o OK do usuário).** No `main`, não lançados: c2a2320
+(write tracking), ba93baa (setup nativo sem build), 0d3731c (sync lag depois de cada carregamento), 056a9a0 (arena da
+Mali coerente), fa56eb3 + f1d15ba (mods que adicionam arquivos, mods do DLC, arquivos do jogo e mods no lugar),
+2901800 (SavageWind: upsample, IADD3), 1ff912a (gathers a 1/256 de texel: os pontos na grama), 7e3c35d (saves com
+arquivos de outro dono, #77), 54e90d8 (sem pontas nas partículas no hit-stop), dd01c2a + 325da58 (aspecto livre: menus,
+Game Over, loading; o "ME"), 833cb5d (memória do jogo
+na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com controle sem giroscópio, #78).
+- Antes: testar no POCO os mods "no lugar" (nunca testados) e ver se o resto da tela continua igual com os gathers
+  arredondados (sombras, água, reflexos). Os shaders compilam de novo uma vez (o GLSL dos gathers mudou): dizer nas notas.
+- Depois: postar as respostas de `docs/RESPOSTAS-ISSUES-2026-10-28.md` (#43, #70/#72/#75, #71/#67/#62/#54, #74, #65)
+  e avisar #21 e #80 dos pontos na grama.
+
+**Gráficos (lista do usuário, 2026-10-28; recompilado e nativo, salvo indicação):**
+- ~~A malha de pontos acima de 50% de resolução~~ (1ff912a). As linhas pretas que correm no chão à frente do Link são
+  provavelmente o mesmo defeito: conferir.
+- ~~Vértices tremendo no impacto de um golpe~~: as pontas na fumaça da Montanha da Morte, na névoa e na fumaça dos
+  monstros no hit-stop (corrigido, ver a fila).
+- ~~Tela de Game Over mostrando só "ME"~~ (325da58): os glifos do texto são lidos pelo vertex shader de um buffer
+  que o jogo reescreve a cada quadro; com o sync lag a GPU lia o do quadro seguinte. Agora copiados ao gravar o draw.
+- FPS mais alto e mais estável.
+- Texturas piscando (raro).
+- ~~Aspecto livre: recorte no menu, bordas da tela de morte, loading que encolhia e esticava~~ (dd01c2a, 325da58;
+  testado no POCO). Falta conferir a tela de título e os vídeos com essas mudanças.
+- Aspecto livre, troca de páginas do menu (Inventário ↔ Sistema): 0f49d51 recorta páginas e texto na parte 16:9
+  (deixado assim por enquanto, a pedido do usuário). A última versão (as peças do escurecimento sem recorte) não foi
+  conferida em jogo; numa tela mais larga que 16:9 a página ou aparece cortada na borda 16:9 durante a troca, ou mostra
+  a página vizinha nas laterais. Ferramentas: `LARECOMP_LOG_MENUCLIP`, `LARECOMP_LOG_PANEFIX`.
+- Tela preta com o driver padrão da Qualcomm.
+- Menus a 60 fps, como as cutscenes.
+- Só no nativo: o Link pisca ao levar o primeiro golpe.
+- A grama que só carrega de perto: devolver as máscaras de densidade (512x512 e 256x256) à CPU.
+
+**Issues novas (2026-10-28):**
+- **#76** (Snapdragon 8+ Gen 1; um segundo usuário com o mesmo aparelho): tela preta com o HUD a 29 fps, e o app
+  fecha. O log anexado é da sessão anterior (só a tela inicial). Ele usa o Turnip v27 "A8xx" num Adreno 730, que o
+  driver identifica como "725". Pedir o `botwrecomp-log-previous.txt` logo depois do crash, e um teste com o driver do
+  sistema.
+- **#77** (Turnip Gen8 V37, 0.2.2): dois problemas.
+  - `svcBreak(reason=0)` em 0x10437eba4 depois de importar um save editado: o jogo aborta sozinho, provavelmente por
+    dados inconsistentes no save.
+  - "Importar saves" falha com `EACCES` em `v160/save/save_0/2/game_data.sav`, um arquivo da pasta do próprio app que
+    ele não consegue abrir: o dono é outro (copiado por outro app, root, ou uma instalação anterior). O `svcBreak` é
+    o mesmo problema: o jogo não abre o próprio save. **Corrigido** em 7e3c35d (testado no POCO com uma pasta de
+    teste): ao montar o save, arquivos legíveis de outro dono viram uma cópia do app (`save_0.before-own` guarda a
+    anterior); ilegíveis param com uma mensagem que diz o arquivo e manda usar Importar saves (que já troca a pasta
+    inteira); o Exportar explica o mesmo. Resposta no rascunho de 28/10.
+- **#78**: o giroscópio não funciona com um controle USB-C encaixado no celular (GameSir X5 Lite, que não tem
+  giroscópio próprio, ao que parece). Usar o giroscópio do celular quando o controle não tiver um.
+  Feito em 05cb1b6 (sem controle assim para testar): os sensores do controle só substituem os do celular depois que o
+  giroscópio dele se move; um controle que diz ter giroscópio e manda zeros segurava os do celular. Perguntar se a
+  opção Controles de movimento está ligada.
+- **#79** (Samsung, Android 16, tela 2340x1080): as Configurações da tela inicial ficam pretas, com só um canto do
+  painel aparecendo embaixo à direita: o layout sai da tela. Pedir o modelo e se é dobrável, DeX ou janela.
+- **#80** (AYN Odin 3, Adreno 830, 1.8.2): as linhas pretas na grama são os pontos corrigidos em 1ff912a. Responder
+  com a 0.2.3.
+- **#81** (Dimensity 8400, Mali-G720): sem descrição. Pedir o log; provavelmente a arena da Mali (056a9a0).
+- **#82**: pedido de escolher um `.nsp`/`.xci` e extrair exefs e romfs no celular (com as `prod.keys` do usuário), como
+  o LASRecomp Android Plus. Decisão do usuário (chaves e o que entra no app).
+- **#70** (Adreno 650): abre com "Memória do jogo na GPU" ligada, mas a 7-10 fps na caverna.
+- **#83** (Mi 9T Pro, Snapdragon 855, Adreno 640, 6 GB, 1.6.0, 0.2.2): no modo nativo chega ao título, mas cai quando
+  o mapa termina de carregar (save) ou pouco antes de o Link acordar (jogo novo); o log diz "signaled (reason 2,
+  status 9)" com ~3,9 GB de RAM: o Android matou o app por memória, com muitos "shader still building" antes. No
+  recompilado cai na hora. O log anexado: Turnip v26 R5, `guest heap 3120 MB is GPU memory` - a "Memória do jogo na
+  GPU" ligada à mão (o Automático só liga no Adreno 8xx), 3,1 GB de memória da GPU reservados de uma vez num celular
+  de 6 GB; a sessão anterior terminou com 3.664 MB de PSS. Feito em 833cb5d: abaixo de ~7 GB de RAM a opção é ignorada
+  e o log diz por quê (não testado num celular assim). Falta responder, pedindo para desligá-la até a 0.2.3.
+- **#85** (Helio G100, Mali-G57 MC2, 8 GB, 1.9.0, 0.2.2; o mesmo no comentário novo do #1): com o driver
+  PanVK-FristOneRR-V.3.5 (sem ele, fecha ao dar Play) chega à primeira cutscene e aparece uma mensagem de erro.
+  A screenshot: `vkWaitSemaphores: -4 (device lost)` - o trabalho da GPU travou ou falhou no PanVK, na primeira
+  cutscene (vídeo ou os primeiros shaders do mundo). Sem um Mali para testar; pedir o log
+  (`botwrecomp-log-previous.txt`) e se com outro PanVK passa.
+- **Tela de Game Over com só "ME"** (usuário, 2026-10-28): numa segunda morte o texto saiu inteiro; a gravação só
+  pegou o começo da animação. Intermitente: falta saber se ficou parado assim, e a quantos fps.
+
+- **#52** (Infinix GT 30 Pro, Mali-G615; dois usuários com o mesmo celular, 1.8.2): o build para no `main_012.c` com
+  `error: checking cache failed: file_open` do zig - o cache dele (`.gamebuild/zig-cache`, na pasta de dados) não abre
+  um arquivo. A mensagem "2 GB livres" era a genérica. Respondido pedindo o log da 0.2.3.
+- Todas as issues abertas respondidas em 28/10 (segunda leva em `docs/RESPOSTAS-ISSUES-2026-10-28.md`).
+
+**Triagem de 2026-10-30 (depois da 0.2.4; logs baixados e conferidos):**
+- **Confirmadas corrigidas na 0.2.4:** build #92 (fechada pelo autor), desempenho Mali de volta (#99 G615 13-19 fps,
+  #54 "performance fixed, no crashes or glitches", #89 24-30 fps, #93 "working like the previous version", #44 texto
+  continua certo na G2-Ultra), save de outro app #77 ("now fine"), pontos na grama #80 (fechada).
+- **Regressão da 0.2.4 - giroscópio (#78 crash ao mirar + "ainda não resolve", #115 S24 Ultra "gyro broken"):** o
+  critério de 05cb1b6/3976ab9 ficou rígido demais: exigir mag > 0.05 por 250 ms contínuos nunca engata uma mira lenta
+  (controles reais em repouso mandam ruído ~0.001-0.02, nunca zero exato). Trocar para: engata com N leituras
+  consecutivas != 0 exato (o GameSir manda zero exato), volta ao celular com 2 s de zero exato. O crash do #78 não tem
+  log (anexou o da sessão seguinte): pedir o botwrecomp-log-previous.txt.
+- **#87 validado, causa achada:** `setup failed: romfs/ has 7094 files ... System/Version.txt` ausente - 7094 é o
+  romfs do DLC: o find() do Activity/launcher achou o romfs do DLC (tem Pack/) antes do romfs do jogo na pasta do SD.
+  Corrigir: um romfs só vale com System/Version.txt (AocVersion.txt = DLC), e seguir procurando.
+- **Família dos vídeos (prioridade):** #113 (Adreno 825, 1.8.2 no lugar): `[movie] cannot open .../romfs/Movie/
+  Demo152_0.webm` e SIGSEGV 0x189 logo depois - falha de open sem tratamento derruba o jogo (cutscene do Domínio
+  Zora); conferir por que não abriu (dump sem o arquivo?). #93 (Mali G720): log termina exatamente em "first frame
+  decoded" - crash na primeira moldura do vídeo na Mali. #86/#107 (Xclipse 530): primeira moldura decodificada e o
+  jogo congela em tela preta na torre. #22 (Adreno 840): nem decodifica. Quatro sintomas no mesmo caminho do vídeo.
+- **Crashes depois de minutos em Mali (cópia, native e recompilado): hipótese nova.** #54 (`0x80000042480a38`, odd
+  write faults 6), #89 (host pc em f_1013f9e40, 0x14c, odd 8), #44 (G2-Ultra 16 GB: SIGSEGV code 2 **write em página
+  com estado 2 = gravável**, odd 9, e no mesmo instante `Scudo: internal map failure (Out of memory)` + malloc NULL
+  com RAM livre). Tudo aponta para **esgotamento de VMAs (vm.max_map_count, 65530)**: o write tracking alterna
+  RO/RW página a página e fragmenta o heap em dezenas de milhares de mappings; mprotect e o malloc do scudo passam a
+  falhar com ENOMEM. A Adreno do POCO não sofre porque o heap fica na GPU (sem tracking). Verificar: contar linhas de
+  /proc/self/maps ao longo de uma sessão com LARECOMP_VK_NO_PLACED=1; mitigação: rearmar RO em faixas contíguas
+  (uma mprotect por faixa, os VMAs se fundem) e/ou parar o tracking perto do limite.
+- **#112 (3122380113): análise excelente e plausível** - árvores distantes pretas com resolução dinâmica != 1x: o
+  passe de material lê o ID (7) de um alvo escalado fora do centro do texel, `trunc(x*255)` dá 6 e o passe de luz pula
+  o pixel. Mesma família do gather snap (1ff912a). Corrigir: arredondar (round) a conversão UNORM8->int no translate,
+  ou amostrar no centro do texel nesse padrão. Pode explicar também as folhas escuras (botw-dark-leaves).
+- **#111 (Adreno 735 Turnip 24.3, 1.0.0 nativo):** null deref no código do jogo ~50 s depois do boot, logo após um
+  gmiss learn; 6-8 fps. Pedir teste no recompilado e na 1.6.0+; a PR #103 (origin) muda o heap Auto nos 7xx renomeados.
+- **#101 (Mi 9T Pro):** logs anexados são da sessão seguinte (15 linhas); o recompilado "crasha antes dos botões".
+  Pedir o log-previous logo após o crash. Nativo 5-11 fps = CPU-bound (como #108, #70).
+- **#108 (Adreno 630, SD845):** nativo roda, 5-7 fps CPU-bound; e bug separado real: `FATAL: vkCreateSwapchainKHR
+  -1000000001 (surface lost)` ao voltar do background - recriar a surface em vez de FATAL. PR #96 (AAudio resume)
+  aberta do mesmo autor.
+- **Outros:** #100 (crash após 5 min, log sem o momento do crash; `vsync timer late... host throttling` antes), #104
+  (SD888 crash no início = #58), #105 (MTK 9400: congela na floresta, manchas roxas; logs não mostram o congelamento),
+  #109 (G720: flicker colorido depois de mexer nas configurações em jogo), #110/#116 (pedidos de otimização, Adreno
+  610 e Mali fracas), #114 (Poco F7 8s Gen4: stutter após 5 min com v38+SGSR, térmico?), #102 (APK "corrompido" no
+  HyperOS: download/instalador), #61 (G68: 0.2.4 13 fps < 0.2.2 17 fps; bomba azul e Stasis congelam; corpo do Link
+  parcialmente invisível), #85 (G57 MC2 segue 2-7 fps), #9 (G68: OOM na compilação de shaders), #44 (60 fps cai para
+  ~30 depois de um tempo: investigar junto com o pacer).
+
+**Triagem de 2026-10-30, tarde:**
+- **#54 (Mali G720, 0.2.4, 1.9.0 recompilado, romfs no lugar + DLC):** desempenho melhorou ("ainda pior que a 0.2.2"),
+  mas agora **crasha sempre ao pegar o parapente** (evento do velho no Platô) - progressão travada. O log-previous
+  anexado não é o do crash: cobre só 12 s de boot (termina em 22.768 sem `*** SIGSEGV`, nenhuma linha do handler).
+  Pedir o log-previous logo depois do crash no parapente e, se possível, o save de antes do evento (repro em casa:
+  Mali não temos, mas dá para ver se a Adreno com LARECOMP_VK_NO_PLACED=1 cai no mesmo ponto). Encaixa nos "crashes
+  depois de minutos em Mali" (hipótese dos VMAs, acima).
+- **#117 (Retroid Pocket 5 / SD865 Adreno 650, 0.2.2, 1.8.2 recompilado, Turnip 24.3 R9v2):** SIGSEGV logo depois de
+  JOGAR - o log acaba em `transient ring`, antes do `[gamelib]` (carga do botwgame.so), sem linhas do handler; o run
+  anterior também terminou com status 11. Não é o #58 (esse cai mais tarde, lendo o save). 0.2.2 é anterior às
+  correções do build (#52/#92) e do botwgame.so com UBSan (#56/#60): pedir 0.2.4 (refaz o código do jogo se o id não
+  bater) e, se continuar, o log-previous + testar com o driver do sistema.
+- **#116 (Mali G610, 9-13 fps):** mais um pedido de desempenho Mali - mesma fila de #110/#61/#85.
+- **Achado nosso, sem issue - bokoblins na 1.0.0 (nativo e recompilado; a 1.9.0 não tem):** uma linha de sombra fina
+  sai do bokoblin vivo e vai ao infinito; ao morrer, o corpo (já escuro do efeito de morte) e a sombra esticam numa
+  cunha preta até um ponto fixo no horizonte; ao apanhar parecem afundar no chão. Um vértice vai para a origem do
+  mundo no passe de sombra (896x896, vs 3da039b00/3da258600, fs d6cd7c058b093cb7). Paleta (71 ossos), índices (<= 70)
+  e pesos conferidos no debug frame: corretos. Também um crash em combate na 1.0.0 nativa: vtable =
+  0xbf80000000000000 (floats 0.0/-1.0) num laço de chamadas virtuais (main 0xad63cc).
+  Descartado no mesmo dia (cada um com o usuário lutando): placed heap (LARECOMP_VK_NO_PLACED=1), modo nativo (o
+  recompilado tem o bug; a 1.9.0 não, nos dois modos), compute que grava na memória (LARECOMP_SKIP_CS=store), timing
+  (LARECOMP_VK_ASYNC=0 + LARECOMP_SYNC_ALL=1), o shader de skinning (3 ossos só onde o 4º peso é enchimento: pesos
+  1-3 somam 255 em todas as malhas; paletas sem matriz anômala), as HLE só da 1.0.0 (GetNpadState escreve 0x28 =
+  o que o jogo reserva; six-axis 16 x 0x60 = 0x600 do jogo). Desligando vertex shaders ao vivo (build/skipvs.txt,
+  ferramenta nova em exec.c): sem nenhuma sombra a linha continua - não é do passe de sombra.
+  **Crash reproduzível (2x, 11:33 e 12:12, mesma pilha):** main 0xb56690 percorre as ligações de uniform blocks de um
+  programa (flags, máscara de estágio, ponteiro opcional, objeto) e chama 0xb0dee8 -> `nvnBufferGetAddress(obj+0x48)`
+  com obj = 0x0001000600000001 (dois inteiros pequenos no lugar do ponteiro). Mesma assinatura do vtable: dados do jogo
+  sobrescritos. **Estacionado por decisão do usuário (2026-10-30):** recomendar a 1.8.2 ou a 1.9.0 a quem
+  encontrar (combate na 1.0.0 com linhas/riscos pretos ou crash). Suspeita atual: corrupção de memória específica da 1.0.0 (HLE do NVN antigo escrevendo além do
+  tamanho do objeto da versão 1.0.0? tamanhos dos objetos NVN mudaram entre SDKs) - a linha seria um sintoma
+  visual da mesma corrupção (um dado de desenho trocado). Próximo: achar quem escreve nesse array (watchpoint de
+  escrita no endereço com LARECOMP_WATCH / mprotect) e conferir os tamanhos dos objetos NVN da 1.0.0 contra o que as
+  nossas HLE escrevem.
+
+**Esperando log ou resposta:** #22 (vídeo da torre no Adreno 840), #24/#30 (8s Gen 4), #23 (RP Nova T26), #41
+(build de teste com `uclamp.min`), #68 (S23 a 5-10 fps), #64 (build no Mali-G57).
+
 ## Fila de funcionalidades
 
 Pedidos ainda não começados, o mais recente no fim.
@@ -771,7 +936,9 @@ Pedidos ainda não começados, o mais recente no fim.
 - **Vídeo da torre trava no Adreno 840** (#22; OnePlus 15, Snapdragon 8 Elite Gen 5, 1.0.0 com o dump completo): o
   jogo inteiro para logo depois de `[movie] decoder vp9 configured`, com Turnip e com o driver da Qualcomm; no
   Adreno 830 o mesmo vídeo passa até o fim. O VP9 do FFmpeg 9.0.2 só tem caminhos NEON (os de SVE/SME são do VVC).
-  Falta o log da próxima versão (4a27085) para ver o passo em que para.
+  O log com os marcos de 4a27085 (2026-10-28): `Demo166_0.webm` aberto, `video decoder: first packet: 242 bytes` e
+  nenhum "first frame decoded" depois - o decodificador recebe o primeiro pacote e nunca devolve um quadro. Na 1.8.2
+  o mesmo usuário passa da torre.
 - **#43** (Adreno 740, 1.8.2, Turnip V38): a grama some de vez em quando ao andar, e chamar o cavalo trava com um
   save da 1.6.0. Esperando o log (e se o cavalo usa equipamento de DLC).
   - **A grama:** reproduzida no POCO (1.9.0, Grande Platô, os degraus ao lado da torre, 2026-10-27): a grama baixa
@@ -789,6 +956,37 @@ Pedidos ainda não começados, o mais recente no fim.
     **Corrigido** (2026-10-27): com filtragem nearest nos vertex shaders as frestas sumiam; a causa é o peso bilinear
     (o Switch usa 8 bits de posição sub-texel, o Adreno mais). As coordenadas dos vertex shaders agora são arredondadas a
     1/256 de texel (`LARECOMP_NO_VS_SNAP=1` desliga). Testado no POCO: sem frestas, terreno normal. Avisar no #21.
+  - **Os pontinhos que ficaram** (2026-10-28, POCO, 1.9.0, recompilado e nativo, cena a 1600x900): fileiras de pontos
+    escuros em perspectiva, alinhadas ao terreno, **só no chão gramado** (não na rocha, nem do lado da pedra sem grama),
+    mais visíveis em resoluções acima de 50%. Não é o mesmo defeito das frestas:
+    - Descartados, um por vez: `LARECOMP_VS_NEAREST=1`, `LARECOMP_NO_VS_SNAP=1`, o arredondamento também nos fragment
+      shaders (`LARECOMP_FS_SNAP=1`, diagnóstico novo), buracos na profundidade (o fbdepth do quadro de depuração quase
+      não tem), a profundidade em meia resolução (800x450 R32F, limpa), o depth bias (`LARECOMP_D16_BIAS_SCALE=256`,
+      diagnóstico novo; o jogo nem usa polygon offset nas sombras: factor 0, units 0), a comparação com o mapa de
+      sombra (a iluminação diferida `aaed7dc1f198ccc2` com o sol sempre "aceso", por `LARECOMP_SHADER_SUBST`), a
+      máscara de densidade da grama lida pela CPU (`LARECOMP_WRITEBACK_MAX=1048576`: a 512x512 volta, os pontos
+      ficam), os cartões de grama (`LARECOMP_SKIP_FSHASH=477912f75d2e8819`) e o índice de material do terreno gramado
+      lido por `texelFetch` (substituição do fs `60f90627d72c7d08`).
+    - Onde estão: o terreno gramado é desenhado por `50fc37edcd79cf02` / `60f90627d72c7d08` (pulando os dois e o
+      `477912...`, o chão gramado some e a rocha fica); os pontos já estão na iluminação em meia resolução (pass 167,
+      800x450) e no primeiro passe de cor depois dela. O terreno não grava normal no alvo de normais do G-buffer
+      (1600x900 f0x25 @3cda43600: preto no chão).
+    - Também descartados: profundidade do terreno empurrada para trás, Turnip sem bins (`TU_DEBUG=sysmem`), cópias em
+      vez de leituras no lugar (`LARECOMP_FEEDBACK_COPY=1`), o composto `f607b5ab4c2f0720` sem o deslocamento por
+      profundidade e o ruído 4x4 do AO fixo. Os pontos são **alinhados à tela** (colunas a cada 50 px de 1600x900), não ao
+      terreno.
+    - **Corrigido** (2026-10-28): a história do pixel (`build/pick.txt`, agora com `rt=<i>`) mostrou o valor escuro
+      nascendo no azul (oclusão de ambiente) do `8c42c9bc921ed716`, a luz em meia resolução (800x450, alvo 5). A
+      profundidade central do AO vem de um `textureGather` na própria coordenada do pixel: no centro de um texel o 2x2
+      depende do último bit; o Switch arredonda a 1/256 de texel e fica com o texel do pixel, o Adreno às vezes pegava o
+      2x2 anterior (a profundidade do vizinho: escuro junto às folhas). Os gathers agora arredondam a coordenada a 1/256
+      de texel e somam 1/1024 (`LARECOMP_NO_GATHER_SNAP=1` desliga). Testado no POCO: sem pontos, grama e sombras normais.
+      Ferramentas: `LARECOMP_DUMP_FS=<hash>+<hash>`, `LARECOMP_SHADER_SUBST=<pasta>` (`<code>_fs.glsl`),
+      `LARECOMP_DEBUG_PICK` / `build/pick.txt` (`x,y;x,y rt=<i>`).
+  - **A grama que só aparece de perto** (relato de 2026-10-28): a camada de 50 a 130 m depende da máscara de densidade
+    (512x512 RGBA8 e 256x256 RG8) que a CPU lê de volta; o runtime só devolve alvos até 4 KB (ou lineares), então ela
+    nunca volta. O MacNativeGames corrigiu o mesmo (f1043e5, e o PR #829 tira a espera). A fazer: devolver esses alvos,
+    de preferência ao fim da submissão deles, sem esperar a GPU.
 - **#23** (RP Nova T26, 1.0.0): o `ActorInfo.product.sbyml` está na pasta, mas a imagem tinha 39.677 arquivos e o
   jogo para ao carregá-lo. Esperando a mensagem da verificação de setup da 0.1.11 (qual arquivo falta) e o tamanho
   exato do arquivo (760.223 bytes).
@@ -900,7 +1098,31 @@ Pedidos ainda não começados, o mais recente no fim.
     (`LARECOMP_TEX_FULLHASH=1`: as pontas continuam).
   - Parado aqui (cosmético, um quadro). Próximo, se retomado: o vs calculado na CPU com os vértices e cbufs do quadro
     de transição do hit-stop, ou a tradução do Ryujinx do mesmo shader para comparar.
+  - **Corrigido** (2026-10-28). O `8d989710` era o draw errado: pulado (`LARECOMP_SKIP_FSHASH`), a fumaça e a névoa
+    continuavam. A história do pixel na nuvem achou o `775680b66449d03a` (fluxo 800x450 f0x29; pulado, a nuvem larga
+    some), que estica cada partícula pela velocidade (`a6.xyz`, girada pela matriz do emissor) vezes `1 / cb10[2].w`.
+    `cb10[2].w` é o delta frame do jogo (1,0 a 30 fps, 0,5 a 60) vezes o multiplicador de tempo mais lento: no hit-stop
+    0,05, então o esticamento cresce 10x por alguns quadros (a fumaça dos monstros derrotados também). A 30 fps estica
+    igual: é do próprio jogo. A pedido do usuário, o tradutor lê esse passo, só no recíproco de `c[10][0x2c]` dos vertex
+    shaders, como no mínimo 0,5 (`LARECOMP_NO_STEP_CLAMP=1` desliga). Só shaders de partículas leem `cb10[2].w`; os
+    outros o usam como `idade + w`, que fica igual. Testado no POCO a 60 fps: sem pontas.
+    Ferramentas novas: `LARECOMP_DEBUG_ON_FS_CB=<fs>:<estágio>:<cbuf>:<float>:<abaixo>` (quadro de depuração quando o
+    valor cai: o início do hit-stop), `LARECOMP_LOG_FS_VB=<fs>:<fluxo>`, `LARECOMP_SHADER_PATCH=<arquivo>` (troca de texto
+    no GLSL dos programas com aquele fs), e o `LARECOMP_DEBUG_DATA` mostra os fluxos por instância (2 a 7).
 - **Aquecimento de shaders com listas conhecidas** (como o MacNativeGames): menos travadas no primeiro jogo. Médio.
+  Pedido de novo pelo usuário em 2026-10-30 ("preparar os shaders antes de iniciar o jogo"). Hoje entre sessões já
+  ficam o SPIR-V de cada shader (`cache/spirv`, chave pelo GLSL) e o pipeline cache do driver
+  (`cache/vk_pipelines.bin`); na primeira vez o draw é pulado enquanto compila (sem travar, mas some por alguns
+  quadros), e nas seguintes ainda custa a tradução NVN -> GLSL e a criação do pipeline. Falta:
+  - **Lista dos programas vistos:** gravar por sessão a chave de cada pipeline criado (endereço/hash do vs e do fs mais
+    o estado que entra no pipeline: formatos dos alvos, layout dos vértices, blend, topologia) num arquivo por versão
+    do jogo.
+  - **Pré-aquecimento no carregamento:** no boot (ou na tela de título), recriar esses pipelines em threads de fundo
+    antes de o jogador entrar no mundo, com uma barra/percentual; com o pipeline cache do driver, é rápido.
+  - **Para quem nunca jogou:** traduzir todos os shaders do romfs (bfsha) na configuração dá o SPIR-V, mas não o
+    pipeline completo (o estado só se conhece no draw): cobre só parte. Uma lista de chaves comum, gerada aqui e
+    distribuída com o app, não leva conteúdo do jogo (só hashes e estado) - avaliar.
+  - Medir antes/depois: draws pulados e `compile N (waited)` no log `[vk] t=` ao entrar em áreas novas.
 - **Pequenos, do SavageWindRecomp e do MacNativeGames:**
   - feitos em b512a4b (falta testar no celular): o desvio do giroscópio em repouso aprendido e descontado, e a zona
     morta dos analógicos do controle (Configurações > Controles, 0-40%);
