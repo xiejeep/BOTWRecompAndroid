@@ -66,9 +66,10 @@ int main(int argc, char **argv) {
     load_hot(argv[1]);
     int o0 = 0;
     for (int i = 2; i < argc; i++) {
-        bool heavy;
-        if (!mark_cold(argv[i], &heavy)) return 1;
-        o0 += heavy;
+        bool file_o0, heavy;
+        if (!mark_cold(argv[i], &file_o0, &heavy)) return 1;
+        if (heavy && !file_o0) return 2;
+        o0 += file_o0;
     }
     printf("%llu %llu %llu %zu %d %llu\n", g_cold_fns, g_all_fns, g_heavy_fns, g_nhot, o0, g_cold_files);
     return 0;

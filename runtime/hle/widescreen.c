@@ -129,14 +129,92 @@ bool widescreen_in_menu(void) {
     return last && now < last + 30;
 }
 
-float widescreen_hud_shift(float x) {
+// Playing in the world: not the title or a loading screen, no menu of the game's up (pause, map) - the touch controls'
+// icon layout (ui/touch_controls.mm); the classic one stays in the menus
+bool widescreen_world_play(void) { return in_world() && !widescreen_in_menu(); }
+
+// The minimap's disc (vulkan/exec.c: its pane's shader) was drawn this frame or in the last few: the minimap is on screen.
+// A talk's answers sit where it would be (x 450, y -133 to -237) while it's hidden; moved up with it, they split (#200).
+static uint64_t minimap_frame;
+void widescreen_minimap_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    minimap_frame = renderer_present_count();
+}
+
+// A talk's box (vulkan/exec.c: its pane, about 0, -235) was drawn this frame or in the last few: its rounded ends
+// (x +-284) and the speaker's name stay with it instead of moving out to the screen's edges (widescreen_hud_shift; #200)
+static uint64_t talk_frame;
+void widescreen_talk_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    talk_frame = renderer_present_count();
+}
+
+// The minimap group up at the top right while the on-screen controls are up (ui/touch_controls.mm touch_hud_top: their
+// buttons sat over it) and the player is in the world with the minimap on screen: a pane of the game's 1280x720 layouts in
+// its lower right (x > 290, y -140 to -315: the minimap, the time, temperature and noise meters, the Sheikah Sensor;
+// 2026-11-02, LARECOMP_LOG_PANES) goes up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes,
+// their texts and scissors. Not lower: the scope's and the camera's frames have pieces along the screen's bottom edge
+// (y about -345), which went up with the minimap - a bar across the scope's view (#230, #226), the camera frame's corner
+// cut in half (#220). Right after a menu (the pause, the inventory) too: widescreen_world_play waits 30 frames, and the
+// minimap showed down in its usual place for a second, then jumped up (#229, #220); its own disc tells it's back.
+float widescreen_hud_top(float x, float y) {
+    extern bool touch_hud_top(void);
+    extern uint64_t renderer_present_count(void);
+    if (x < 290.0f || y > -140.0f || y < -315.0f || !touch_hud_top() || !in_world() || framepace_in_menu()) return 0;
+    if (!minimap_frame || renderer_present_count() - minimap_frame > 3) return 0;
+    return 490.0f;
+}
+
+// Where the minimap is on a w x h screen, moved up as above (its centre at layout 515, -245; about 100 units across):
+// a touch there opens the map (ui/touch_controls.mm). false: not up there now.
+float widescreen_hud_shift(float x, float y);
+bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r) {
+    if (widescreen_hud_top(515.0f, -245.0f) == 0) return false;
+    float k = h / 720.0f, lx = 515.0f + (widescreen_ui_centred() ? widescreen_hud_shift(515.0f, -245.0f) : 0), ly = -245.0f + 490.0f;
+    *x = w * 0.5f + lx * k, *y = h * 0.5f - ly * k, *r = 105.0f * k;
+    return true;
+}
+
+// A pane as wide as the screen (vulkan/exec.c full_width_pane: a loading screen's band and its black, the Game Over's
+// black) was drawn this frame or in the last few: a screen of its own is up, nothing moves out. As a load ends the world
+// is drawn again under the loading screen (in_world): its title and tip went out to the left edge, cut, and "Next tip"
+// off the right one, for its last second (#195).
+static uint64_t band_frame;
+void widescreen_band_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    band_frame = renderer_present_count();
+}
+
+// (row: below this y the prompts' row - a pane's centre or a text's origin, widescreen_hud_shift / _text)
+static float hud_shift(float x, float y, float row) {
+    extern uint64_t renderer_present_count(void);
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
+    if (band_frame && renderer_present_count() - band_frame <= 3) return 0;
+    // A talk's box on screen: nothing moves out. Its ends (+-284) and the name, and its answers (boxes at 450, texts from
+    // 352) split from it (#200); and the windows a talk opens - the stable's horse list and its card, the mane and saddle
+    // lists - are pieces whose centres sit at different x, moved by different amounts: the card's background left its
+    // frame, the list's names were cut at their start (#231). The game hides the HUD (hearts, minimap) during a talk.
+    if (talk_frame && renderer_present_count() - talk_frame <= 3) return 0;
+    // The button prompts' row along the bottom (y about -320; on a horse "Reset Camera ZL ... Yah! A", from x -250 to
+    // 365) is centred by the game: its texts (moved by their origin) and their dark shadows (by their centre) fell either
+    // side of the blend below and parted - "Yah!" off its shadow (2026-11-03). Its icons' panes sit at -318; the weather
+    // forecast's, in the minimap's group, at -302 to -315 (x 326-428) - under one line for both, the forecast stayed
+    // behind as the rest of the group went out to the edge (#243). So panes below -316.5, texts' origins below -290.
+    if (y < row && x > -440.0f && x < 440.0f) return 0;
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);
     if (t <= 0) return 0;
     if (t > 1) t = 1;
     t = t * t * (3 - 2 * t);
     float d = 640.0f * (g_wide - 1.0f) * t;
     return x < 0 ? -d : d;
+}
+float widescreen_hud_shift(float x, float y) { return hud_shift(x, y, -316.5f); }       // (a pane's centre, a scissor's)
+float widescreen_hud_shift_text(float x, float y) { return hud_shift(x, y, -290.0f); }  // (a text's origin)
+
+// A talk's box is on screen (in the world): the touch controls give way to it (ui/touch_controls.mm)
+bool widescreen_talk(void) {
+    extern uint64_t renderer_present_count(void);
+    return talk_frame && renderer_present_count() - talk_frame <= 3 && widescreen_world_play();
 }
 
 void widescreen_frame_end(uint64_t frame) { (void)frame; }

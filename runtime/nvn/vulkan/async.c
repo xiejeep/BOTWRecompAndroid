@@ -34,8 +34,8 @@ static int q_presents;            // PRESENT requests queued and not finished (t
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t q_more = PTHREAD_COND_INITIALIZER, q_less = PTHREAD_COND_INITIALIZER;
 static pthread_mutex_t p_lock = PTHREAD_MUTEX_INITIALIZER;  // producers: an id, its list's fences and its push together
-static pthread_t render_thread;
-static bool started;
+pthread_t g_vk_render_thread;  // (also read by device.c renderer_present_count, many times a draw)
+bool g_vk_render_started;
 static int on = -1;
 
 // The game's thread may run this many frames ahead of the render thread (the translation of one frame overlaps the
@@ -50,7 +50,7 @@ uint64_t vk_async_frame_cpu_ns(void) { return __atomic_load_n(&last_frame_cpu, _
 void kernel_blocking_begin(void);        // kernel.c: core 0 to the game's other threads while a guest thread waits here
 void kernel_blocking_end(void);
 void vk_execute_now(uint64_t handle);    // exec.c: translate and submit a command list
-void vk_present_now(NvnTexture *t);      // device.c: the window's half of backend_present
+void vk_present_now(NvnTexture *t, uint64_t asked);  // device.c: the window's half of backend_present
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
 uint64_t renderer_fence_seq(void);
 
@@ -65,7 +65,7 @@ bool vk_async_on(void) {
     return on;
 }
 
-bool vk_async_is_render_thread(void) { return started && pthread_equal(pthread_self(), render_thread); }
+bool vk_async_is_render_thread(void) { return g_vk_render_started && pthread_equal(pthread_self(), g_vk_render_thread); }
 
 // Thread CPU time excludes GPU fences, swapchain acquisition and time descheduled by Android.
 static uint64_t render_cpu_ns(void) {
@@ -91,7 +91,7 @@ static void *render_main(void *arg) {
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (exec.c: LARECOMP_FRAME_TIMELINE)
         vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
         if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
-        else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
+        else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p, r.a);
         if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;
@@ -115,9 +115,9 @@ static void *render_main(void *arg) {
 
 static uint64_t push(int type, uint64_t a, void *p) {
     pthread_mutex_lock(&q_lock);
-    if (!started) {
-        started = true;
-        pthread_create(&render_thread, NULL, render_main, NULL);
+    if (!g_vk_render_started) {
+        g_vk_render_started = true;
+        pthread_create(&g_vk_render_thread, NULL, render_main, NULL);
     }
     if (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) {
         pthread_mutex_unlock(&q_lock);
@@ -142,7 +142,7 @@ static uint64_t push(int type, uint64_t a, void *p) {
 
 // Until the render thread has finished request `id` (0: nothing to wait for).
 void vk_async_wait_id(uint64_t id) {
-    if (!id || !started || vk_async_is_render_thread()) return;
+    if (!id || !g_vk_render_started || vk_async_is_render_thread()) return;
     pthread_mutex_lock(&q_lock);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
@@ -150,7 +150,7 @@ void vk_async_wait_id(uint64_t id) {
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
-    if (!started || vk_async_is_render_thread()) return;
+    if (!g_vk_render_started || vk_async_is_render_thread()) return;
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
@@ -226,7 +226,7 @@ void vk_async_execute(uint64_t handle) {
 
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
-    push(REQ_PRESENT, 0, t);
+    push(REQ_PRESENT, plat_now_ns(), t);  // (a: when the game handed it over: device.c vsync_update)
     pthread_mutex_unlock(&p_lock);
 }
 
